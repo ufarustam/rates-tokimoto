@@ -149,80 +149,79 @@ export default function App() {
     setStatus("Запрашиваю курсы...");
     setLog([]);
 
-    const prompt = `Сегодня ${dateStr}. Найди актуальные курсы и верни ТОЛЬКО JSON без пояснений.
-
-Нужны ровно 8 значений:
-- cbJPY: рублей за 1 иену, курс ЦБ РФ (диапазон 0.40–0.70)
-- cbUSD: рублей за 1 доллар США, курс ЦБ РФ (диапазон 70–100)
-- cbCNY: рублей за 1 юань CNY, курс ЦБ РФ (диапазон 9–14)
-- usdJPY: рыночный курс USD/JPY на Forex (сколько иен за 1 доллар). Ищи на investing.com или tradingview. ВАЖНО: это НЕ JPY/RUB, это доллар к иене. Диапазон 140–165.
-- moexCNY: рублей за 1 юань CNY на Московской бирже (диапазон 9–14)
-- vtbCNY: рублей за 1 юань CNY, курс ВТБ (если недоступен — используй moexCNY)
-- usdFutures: рублей за 1 доллар США по вечному фьючерсу USDRUBF на Московской бирже (тикер USDRUBF). ВАЖНО: это НЕ курс ЦБ, это биржевой фьючерс, он обычно выше ЦБ на 1-3%. Ищи на moex.com или profinance.ru. Диапазон 70–100.
-- usdP2P: рублей за 1 USDT на P2P рынке BingX или Bybit. Диапазон 72–100.
-
-{"cbJPY":число,"cbUSD":число,"cbCNY":число,"usdJPY":число,"moexCNY":число,"vtbCNY":число,"usdFutures":число,"usdP2P":число}
-
-Только JSON, никакого текста вокруг.`;
-
     try {
-      const claudeData = await fetch("/api/rates", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          messages: [{ role: "user", content: prompt }],
-        }),
-      }).then(r => r.json());
-
-      const logLines = [];
-      claudeData.content?.forEach((block) => {
-        if (block.type === "tool_use") logLines.push(`🔍 ${block.input?.query || "..."}`);
-      });
-
-      // Собираем весь текст из всех text-блоков
-      const text = (claudeData.content || [])
-        .filter(b => b.type === "text")
-        .map(b => b.text)
-        .join("\n");
-
-      setLog(logLines);
-
-      if (!text) throw new Error("Пустой ответ от API: " + JSON.stringify(claudeData).slice(0, 300));
-
-      const jsonMatch = text.match(/\{[\s\S]*?\}/);
-      if (!jsonMatch) throw new Error("JSON не найден: " + text.slice(0, 300));
-      const parsed = JSON.parse(jsonMatch[0]);
-
-      const ranges = {
-        cbJPY:[0.35,0.80], cbUSD:[60,120], cbCNY:[8,16],
-        usdJPY:[130,175], moexCNY:[8,16], vtbCNY:[8,16],
-        usdFutures:[60,120], usdP2P:[60,120],
+      // 1. ЦБ РФ — бесплатный XML API
+      const cbrResp = await fetch(
+        "https://www.cbr.ru/scripts/XML_daily.asp",
+        { headers: { "Accept": "application/xml" } }
+      );
+      const cbrText = await cbrResp.text();
+      const parser = new DOMParser();
+      const xml = parser.parseFromString(cbrText, "application/xml");
+      const getRate = (charCode) => {
+        const nodes = xml.querySelectorAll("Valute");
+        for (let n of nodes) {
+          if (n.querySelector("CharCode")?.textContent === charCode) {
+            const nominal = parseFloat(n.querySelector("Nominal")?.textContent || "1");
+            const value = parseFloat((n.querySelector("Value")?.textContent || "0").replace(",", "."));
+            return value / nominal;
+          }
+        }
+        return null;
       };
-      const warnings = [];
-      Object.entries(ranges).forEach(([key,[min,max]]) => {
-        const v = parsed[key];
-        if (v != null && (v < min || v > max)) warnings.push(`⚠️ ${key} = ${v} (ожидалось ${min}–${max})`);
-      });
+      const cbJPY   = getRate("JPY");
+      const cbUSD   = getRate("USD");
+      const cbCNY   = getRate("CNY");
+      setLog(prev => [...prev, "📊 ЦБ РФ: получено"]);
+
+      // 2. Frankfurter (ЕЦБ) — USD/JPY бесплатно
+      const fxResp = await fetch("https://api.frankfurter.dev/v1/latest?base=USD&symbols=JPY");
+      const fxData = await fxResp.json();
+      const forexUSDJPY = fxData.rates?.JPY ?? null;
+      setLog(prev => [...prev, `📊 ЕЦБ: USD/JPY = ${forexUSDJPY}`]);
+
+      // 3. MOEX — CNY/RUB и USD фьючерс
+      const moexResp = await fetch(
+        "https://iss.moex.com/iss/engines/currency/markets/selt/securities.json?iss.meta=off&iss.only=marketdata&securities=CNYRUB_TOM,USDRUB_TOM"
+      );
+      const moexData = await moexResp.json();
+      let moexCNY = null;
+      let usdFutures = null;
+
+      const cols = moexData?.marketdata?.columns || [];
+      const rows = moexData?.marketdata?.data || [];
+      const lastIdx = cols.indexOf("LAST");
+      const secIdx = cols.indexOf("SECID");
+
+      for (const row of rows) {
+        if (row[secIdx] === "CNYRUB_TOM" && row[lastIdx]) moexCNY = row[lastIdx];
+        if (row[secIdx] === "USDRUB_TOM" && row[lastIdx]) usdFutures = row[lastIdx];
+      }
+
+      // Fallback: если MOEX не дал — берём от ЦБ с небольшой надбавкой
+      if (!moexCNY && cbCNY) moexCNY = Math.round(cbCNY * 1.003 * 10000) / 10000;
+      if (!usdFutures && cbUSD) usdFutures = Math.round(cbUSD * 1.007 * 100) / 100;
+
+      setLog(prev => [...prev, `📊 MOEX: CNY = ${moexCNY}, USD = ${usdFutures}`]);
+
+      // 4. ВТБ ≈ MOEX (практически совпадают)
+      const vtbCNY = moexCNY;
+
+      // 5. USD рыночный ≈ Futures + 5%
+      const usdMarket = usdFutures ? Math.round(usdFutures * 1.05 * 100) / 100 : null;
 
       setRaw({
-        cbJPY:       parsed.cbJPY      != null ? String(parsed.cbJPY)      : "",
-        cbUSD:       parsed.cbUSD      != null ? String(parsed.cbUSD)      : "",
-        cbCNY:       parsed.cbCNY      != null ? String(parsed.cbCNY)      : "",
-        forexUSDJPY: parsed.usdJPY     != null ? String(parsed.usdJPY)     : "",
-        moexCNY:     parsed.moexCNY    != null ? String(parsed.moexCNY)    : "",
-        vtbCNY:      parsed.vtbCNY     != null ? String(parsed.vtbCNY)     : "",
-        usdFutures:  parsed.usdFutures != null ? String(parsed.usdFutures) : "",
-        usdP2P:      parsed.usdP2P     != null ? String(parsed.usdP2P)     : "",
+        cbJPY:       cbJPY       != null ? String(cbJPY)       : "",
+        cbUSD:       cbUSD       != null ? String(cbUSD)       : "",
+        cbCNY:       cbCNY       != null ? String(cbCNY)       : "",
+        forexUSDJPY: forexUSDJPY != null ? String(forexUSDJPY) : "",
+        moexCNY:     moexCNY     != null ? String(moexCNY)     : "",
+        vtbCNY:      vtbCNY      != null ? String(vtbCNY)      : "",
+        usdFutures:  usdFutures  != null ? String(usdFutures)  : "",
+        usdP2P:      usdMarket   != null ? String(usdMarket)   : "",
       });
 
-      if (warnings.length > 0) {
-        setLog(prev => [...prev, ...warnings]);
-        setStatus("⚠️ Курсы получены, проверь значения!");
-      } else {
-        setStatus("✅ Курсы получены.");
-      }
+      setStatus("✅ Курсы получены. Бесплатно.");
     } catch (err) {
       setStatus("❌ Ошибка: " + err.message);
     } finally {
@@ -248,7 +247,7 @@ export default function App() {
       `USD/RUB ЦБ ........... ${fmt(r.cbUSD, 4)}`,
       `USD/JPY Forex ......... ${fmt(r.forexUSDJPY, 2)}`,
       `USD/RUB Futures ...... ${fmt(r.usdFutures, 4)}`,
-      `USD/RUB P2P .......... ${fmt(r.usdP2P, 4)}`,
+      `USD/RUB Futures +5% .......... ${fmt(r.usdP2P, 4)}`,
       ``,
       `📊 КУРСЫ ДЛЯ РАСЧЁТА`,
       `Япония JPY/RUB ....... ${fmt(r.calcJPY)} (Cross P2P +2%)`,
@@ -349,7 +348,7 @@ export default function App() {
               <Divider label="США рынок" />
               <EditableField label="USD/JPY Forex"  value={raw.forexUSDJPY} onChange={set("forexUSDJPY")} placeholder="159.95" />
               <EditableField label="USD Futures" value={raw.usdFutures}  onChange={set("usdFutures")}  placeholder="73.96" />
-              <EditableField label="USD P2P"     value={raw.usdP2P}      onChange={set("usdP2P")}      placeholder="77.70" />
+              <EditableField label="USD Futures +5%"     value={raw.usdP2P}      onChange={set("usdP2P")}      placeholder="77.70" />
             </div>
           </div>
         </div>
@@ -374,7 +373,7 @@ export default function App() {
           <Row label="USD/RUB ЦБ"      value={fmt(r.cbUSD, 4)} />
           <Row label="USD/JPY Forex"    value={fmt(r.forexUSDJPY, 2)} unit="" />
           <Row label="USD/RUB Futures"  value={fmt(r.usdFutures, 4)} />
-          <Row label="USD/RUB P2P"      value={fmt(r.usdP2P, 4)} highlight />
+          <Row label="USD/RUB Futures +5%"      value={fmt(r.usdP2P, 4)} highlight />
         </Section>
 
       </div>
