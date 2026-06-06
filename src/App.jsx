@@ -150,78 +150,29 @@ export default function App() {
     setLog([]);
 
     try {
-      // 1. ЦБ РФ — бесплатный XML API
-      const cbrResp = await fetch(
-        "https://www.cbr.ru/scripts/XML_daily.asp",
-        { headers: { "Accept": "application/xml" } }
-      );
-      const cbrText = await cbrResp.text();
-      const parser = new DOMParser();
-      const xml = parser.parseFromString(cbrText, "application/xml");
-      const getRate = (charCode) => {
-        const nodes = xml.querySelectorAll("Valute");
-        for (let n of nodes) {
-          if (n.querySelector("CharCode")?.textContent === charCode) {
-            const nominal = parseFloat(n.querySelector("Nominal")?.textContent || "1");
-            const value = parseFloat((n.querySelector("Value")?.textContent || "0").replace(",", "."));
-            return value / nominal;
-          }
-        }
-        return null;
-      };
-      const cbJPY   = getRate("JPY");
-      const cbUSD   = getRate("USD");
-      const cbCNY   = getRate("CNY");
-      setLog(prev => [...prev, "📊 ЦБ РФ: получено"]);
+      const resp = await fetch("/api/rates");
+      const data = await resp.json();
 
-      // 2. Frankfurter (ЕЦБ) — USD/JPY бесплатно
-      const fxResp = await fetch("https://api.frankfurter.dev/v1/latest?base=USD&symbols=JPY");
-      const fxData = await fxResp.json();
-      const forexUSDJPY = fxData.rates?.JPY ?? null;
-      setLog(prev => [...prev, `📊 ЕЦБ: USD/JPY = ${forexUSDJPY}`]);
+      if (data.error) throw new Error(data.error);
 
-      // 3. MOEX — CNY/RUB и USD фьючерс
-      const moexResp = await fetch(
-        "https://iss.moex.com/iss/engines/currency/markets/selt/securities.json?iss.meta=off&iss.only=marketdata&securities=CNYRUB_TOM,USDRUB_TOM"
-      );
-      const moexData = await moexResp.json();
-      let moexCNY = null;
-      let usdFutures = null;
-
-      const cols = moexData?.marketdata?.columns || [];
-      const rows = moexData?.marketdata?.data || [];
-      const lastIdx = cols.indexOf("LAST");
-      const secIdx = cols.indexOf("SECID");
-
-      for (const row of rows) {
-        if (row[secIdx] === "CNYRUB_TOM" && row[lastIdx]) moexCNY = row[lastIdx];
-        if (row[secIdx] === "USDRUB_TOM" && row[lastIdx]) usdFutures = row[lastIdx];
-      }
-
-      // Fallback: если MOEX не дал — берём от ЦБ с небольшой надбавкой
-      if (!moexCNY && cbCNY) moexCNY = Math.round(cbCNY * 1.003 * 10000) / 10000;
-      if (!usdFutures && cbUSD) usdFutures = Math.round(cbUSD * 1.007 * 100) / 100;
-
-      setLog(prev => [...prev, `📊 MOEX: CNY = ${moexCNY}, USD = ${usdFutures}`]);
-
-      // 4. ВТБ ≈ MOEX (практически совпадают)
-      const vtbCNY = moexCNY;
-
-      // 5. USD рыночный ≈ Futures + 5%
-      const usdMarket = usdFutures ? Math.round(usdFutures * 1.05 * 100) / 100 : null;
+      setLog([
+        `📊 ЦБ РФ: JPY=${data.cbJPY}, USD=${data.cbUSD}, CNY=${data.cbCNY}`,
+        `📊 ЕЦБ: USD/JPY=${data.forexUSDJPY}`,
+        `📊 MOEX: CNY=${data.moexCNY}, USD=${data.usdFutures}`,
+      ]);
 
       setRaw({
-        cbJPY:       cbJPY       != null ? String(cbJPY)       : "",
-        cbUSD:       cbUSD       != null ? String(cbUSD)       : "",
-        cbCNY:       cbCNY       != null ? String(cbCNY)       : "",
-        forexUSDJPY: forexUSDJPY != null ? String(forexUSDJPY) : "",
-        moexCNY:     moexCNY     != null ? String(moexCNY)     : "",
-        vtbCNY:      vtbCNY      != null ? String(vtbCNY)      : "",
-        usdFutures:  usdFutures  != null ? String(usdFutures)  : "",
-        usdP2P:      usdMarket   != null ? String(usdMarket)   : "",
+        cbJPY:       data.cbJPY       != null ? String(data.cbJPY)       : "",
+        cbUSD:       data.cbUSD       != null ? String(data.cbUSD)       : "",
+        cbCNY:       data.cbCNY       != null ? String(data.cbCNY)       : "",
+        forexUSDJPY: data.forexUSDJPY != null ? String(data.forexUSDJPY) : "",
+        moexCNY:     data.moexCNY     != null ? String(data.moexCNY)     : "",
+        vtbCNY:      data.vtbCNY      != null ? String(data.vtbCNY)      : "",
+        usdFutures:  data.usdFutures  != null ? String(data.usdFutures)  : "",
+        usdP2P:      data.usdP2P      != null ? String(data.usdP2P)      : "",
       });
 
-      setStatus("✅ Курсы получены. Бесплатно.");
+      setStatus("✅ Курсы получены.");
     } catch (err) {
       setStatus("❌ Ошибка: " + err.message);
     } finally {
