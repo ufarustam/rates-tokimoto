@@ -181,12 +181,18 @@ export default function App() {
         if (block.type === "tool_use") logLines.push(`🔍 ${block.input?.query || "..."}`);
       });
 
-      const textBlock = claudeData.content?.find((b) => b.type === "text");
-      const text = textBlock?.text || "";
+      // Собираем весь текст из всех text-блоков
+      const text = (claudeData.content || [])
+        .filter(b => b.type === "text")
+        .map(b => b.text)
+        .join("\n");
+
       setLog(logLines);
 
+      if (!text) throw new Error("Пустой ответ от API: " + JSON.stringify(claudeData).slice(0, 300));
+
       const jsonMatch = text.match(/\{[\s\S]*?\}/);
-      if (!jsonMatch) throw new Error("JSON не найден: " + text.slice(0, 200));
+      if (!jsonMatch) throw new Error("JSON не найден: " + text.slice(0, 300));
       const parsed = JSON.parse(jsonMatch[0]);
 
       const ranges = {
